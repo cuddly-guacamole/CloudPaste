@@ -7,11 +7,11 @@ import PasteViewPreview from "./PasteViewPreview.vue";
 import PasteViewOutline from "./PasteViewOutline.vue";
 import PasteViewEditor from "./PasteViewEditor.vue";
 import { formatExpiry, debugLog } from "./PasteViewUtils";
-import { isExpired } from "../../utils/timeUtils.js";
-import { api } from "../../api";
+import { isExpired } from "@/utils/timeUtils.js";
+import { api } from "@/api";
 import { ApiStatus } from "../../api/ApiStatus";
 import { copyToClipboard } from "@/utils/clipboard";
-import { useAuthStore } from "../../stores/authStore.js";
+import { useAuthStore } from "@/stores/authStore.js";
 
 // 定义环境变量
 const isDev = import.meta.env.DEV;
@@ -353,22 +353,16 @@ const saveEdit = async (updateData) => {
     // 检查是否修改了密码
     const passwordChanged = updateData.password || updateData.clearPassword;
 
-    // 根据用户类型调用不同的API更新内容
-    if (isAdmin.value) {
-      // 管理员使用admin API
-      await api.admin.updatePaste(slug, updateData);
-    } else if (hasApiKey.value && hasTextPermission.value && isCreator.value) {
-      // API密钥用户使用user API
-      await api.user.paste.updatePaste(slug, updateData);
-    }
+    // 使用统一API更新内容（自动根据认证信息处理权限）
+    await api.paste.updatePaste(slug, updateData);
 
     // 更新本地内容状态
     paste.value.content = updateData.content;
     // 保存成功后，更新编辑内容的原始值，这样取消按钮可以恢复到最新保存的内容
     editContent.value = updateData.content;
     paste.value.remark = updateData.remark;
-    paste.value.maxViews = updateData.maxViews;
-    paste.value.expiresAt = updateData.expiresAt;
+    paste.value.max_views = updateData.max_views;
+    paste.value.expires_at = updateData.expires_at;
 
     // 切换回预览模式
     switchViewMode("preview");
@@ -539,7 +533,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="paste-view max-w-6xl mx-auto px-4 sm:px-6 flex-1 flex flex-col">
+  <div class="paste-view max-w-6xl mx-auto px-3 sm:px-6 flex-1 flex flex-col pt-6 sm:pt-8">
     <div class="mb-6">
       <!-- 将原来的大标题替换为更简洁的面包屑样式导航 -->
       <div class="py-3 text-sm text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700 mb-4">
@@ -588,6 +582,7 @@ onBeforeUnmount(() => {
               <input
                 :type="showPassword ? 'text' : 'password'"
                 id="password"
+                autocomplete="current-password"
                 v-model="passwordInput"
                 @keyup.enter="submitPassword"
                 class="block w-full px-3 py-2 rounded-md shadow-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 password-input"
@@ -642,21 +637,21 @@ onBeforeUnmount(() => {
         <!-- 元信息显示区域 - 显示过期时间和剩余查看次数 -->
         <div class="mb-6 p-5 border rounded-lg" :class="darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'">
           <div class="grid grid-cols-1 gap-4 text-sm">
-            <div v-if="paste.expiresAt">
+            <div v-if="paste.expires_at">
               <span :class="darkMode ? 'text-gray-400' : 'text-gray-500'">过期时间:</span>
-              <span class="ml-2" :class="[darkMode ? 'text-white' : 'text-gray-900', isExpired(paste.expiresAt) ? 'text-red-500' : '']">{{ formatExpiry(paste.expiresAt) }}</span>
+              <span class="ml-2" :class="[darkMode ? 'text-white' : 'text-gray-900', isExpired(paste.expires_at) ? 'text-red-500' : '']">{{ formatExpiry(paste.expires_at) }}</span>
             </div>
-            <div v-if="paste.maxViews">
+            <div v-if="paste.max_views">
               <span :class="darkMode ? 'text-gray-400' : 'text-gray-500'">剩余查看次数:</span>
               <span
                 class="ml-2"
                 :class="[
                   darkMode ? 'text-white' : 'text-gray-900',
-                  paste.maxViews - paste.views <= 5 ? 'text-amber-500' : '',
-                  paste.maxViews - paste.views <= 1 ? 'text-red-500' : '',
+                  paste.max_views - paste.views <= 5 ? 'text-amber-500' : '',
+                  paste.max_views - paste.views <= 1 ? 'text-red-500' : '',
                 ]"
               >
-                {{ paste.maxViews - paste.views }}
+                {{ paste.max_views - paste.views }}
               </span>
             </div>
           </div>

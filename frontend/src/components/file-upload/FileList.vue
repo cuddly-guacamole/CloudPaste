@@ -50,22 +50,8 @@
             <div class="truncate">
               <div class="flex items-center">
                 <!-- 文件图标 -->
-                <div class="flex-shrink-0 mr-2">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    class="h-5 w-5"
-                    :class="getFileIconClass(file.mimetype, file.filename)"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                    />
-                  </svg>
+                <div class="flex-shrink-0 mr-2 w-5 h-5">
+                  <span v-html="getFileIconClassLocal(file)"></span>
                 </div>
                 <!-- 文件名 -->
                 <div class="flex-1 truncate">
@@ -207,22 +193,8 @@
             <div class="flex items-start justify-between">
               <div class="flex items-start">
                 <!-- 文件图标 -->
-                <div class="mr-3 mt-0.5">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    class="h-6 w-6"
-                    :class="getFileIconClass(file.mimetype, file.filename)"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                    />
-                  </svg>
+                <div class="mr-3 mt-0.5 w-6 h-6">
+                  <span v-html="getFileIconClassLocal(file)"></span>
                 </div>
 
                 <!-- 文件信息 -->
@@ -375,8 +347,8 @@
         </div>
         <div class="flex flex-col items-center">
           <div class="bg-white p-3 rounded-md shadow-md mb-3">
-            <img v-if="qrCodeUrl" :src="qrCodeUrl" :alt="t('file.fileQrCode')" class="w-48 h-48" />
-            <div v-else class="w-48 h-48 flex items-center justify-center">
+            <img v-if="qrCodeUrl" :src="qrCodeUrl" :alt="t('file.fileQrCode')" class="w-60 h-60" />
+            <div v-else class="w-60 h-60 flex items-center justify-center">
               <svg class="animate-spin h-8 w-8" :class="darkMode ? 'text-gray-400' : 'text-gray-600'" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path
@@ -408,12 +380,15 @@
 
 <script setup>
 import { ref, defineProps, defineEmits, watch, onUnmounted } from "vue";
-import { api } from "../../api";
+import { api } from "@/api";
 import { useI18n } from "vue-i18n";
-import * as MimeTypeUtils from "../../utils/mimeTypeUtils";
 import { copyToClipboard } from "@/utils/clipboard";
+import { useDeleteSettingsStore } from "@/stores/deleteSettingsStore.js";
 
 const { t } = useI18n();
+
+// 使用全局删除设置
+const deleteSettingsStore = useDeleteSettingsStore();
 
 const props = defineProps({
   darkMode: {
@@ -436,16 +411,19 @@ const props = defineProps({
 
 const emit = defineEmits(["refresh"]);
 
+// 导入统一的工具函数
+import { getRemainingViews as getRemainingViewsUtil, formatFileSize } from "@/utils/fileUtils.js";
+import { getFileIcon } from "@/utils/fileTypeIcons.js";
+
+import QRCode from "qrcode";
+
 /**
  * 计算剩余可访问次数
  * @param {Object} file - 文件对象
  * @returns {string|number} 剩余访问次数或状态描述
  */
 const getRemainingViews = (file) => {
-  if (!file.max_views || file.max_views === 0) return t("file.unlimited");
-  const viewCount = file.views || 0;
-  const remaining = file.max_views - viewCount;
-  return remaining <= 0 ? t("file.usedUp") : remaining;
+  return getRemainingViewsUtil(file, t);
 };
 
 // 删除状态
@@ -461,10 +439,6 @@ let messageTimeout = null;
 const showQRModal = ref(false);
 const qrCodeUrl = ref(null);
 const currentFileUrl = ref("");
-
-// 判断用户类型
-const isAdmin = () => props.userType === "admin";
-const isApiKeyUser = () => props.userType === "apikey";
 
 // 复制成功标志
 const copiedPermanentFiles = ref({});
@@ -488,15 +462,24 @@ const deleteFile = async () => {
   isDeleting.value = true;
 
   try {
-    // 根据用户类型调用不同的API
-    if (isAdmin()) {
-      await api.file.deleteFile(fileIdToDelete.value);
-    } else {
-      await api.file.deleteUserFile(fileIdToDelete.value);
-    }
+    let response;
 
-    // 显示成功消息
-    showMessage("success", t("file.deletedSuccess"));
+    // 使用统一的批量删除API，传递全局删除模式
+    response = await api.file.batchDeleteFiles([fileIdToDelete.value], deleteSettingsStore.getDeleteMode());
+
+    // 检查批量删除结果
+    if (response.success) {
+      if (response.data && response.data.failed && response.data.failed.length > 0) {
+        // 删除失败
+        const failedItem = response.data.failed[0];
+        throw new Error(failedItem.error || "删除失败");
+      }
+
+      // 显示成功消息
+      showMessage("success", t("file.deletedSuccess"));
+    } else {
+      throw new Error(response.message || "删除失败");
+    }
 
     // 关闭对话框
     showDeleteConfirm.value = false;
@@ -570,29 +553,35 @@ const startMessageTimer = () => {
   }
 };
 
-// 格式化文件大小
-const formatFileSize = (bytes) => {
-  if (bytes === 0) return "0 Bytes";
-
-  const k = 1024;
-  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-};
-
 // 格式化MIME类型
 const formatMimeType = (mimetype, filename) => {
-  return MimeTypeUtils.formatMimeType(mimetype, filename);
+  if (mimetype) {
+    return mimetype;
+  }
+  // 如果没有 MIME 类型，从文件名推断
+  const ext = filename?.split(".").pop()?.toLowerCase();
+  return ext ? `${ext} 文件` : "未知类型";
 };
 
-// 根据MIME类型返回文件图标颜色
-const getFileIconClass = (mimetype, filename) => {
-  return MimeTypeUtils.getFileIconClass(mimetype, props.darkMode, filename);
+/**
+ * 获取文件图标HTML（使用后端返回的type字段）
+ * @param {Object} file - 文件对象（包含type字段）
+ * @returns {string} SVG图标HTML字符串
+ */
+const getFileIconClassLocal = (file) => {
+  // 直接使用后端返回的type字段
+  const fileItem = {
+    name: file.filename,
+    filename: file.filename,
+    isDirectory: false,
+    type: file.type,
+  };
+
+  return getFileIcon(fileItem, props.darkMode);
 };
 
 // 导入统一的时间处理工具
-import { formatDateTime } from "../../utils/timeUtils.js";
+import { formatDateTime } from "@/utils/timeUtils.js";
 
 // 格式化日期
 const formatDate = (dateString) => {
@@ -625,11 +614,21 @@ const closeQRCode = () => {
 };
 
 // 生成二维码
-const generateQRCode = (url) => {
-  // 使用QR Code API生成二维码
-  // 这里使用QRServer.com的免费API
-  const apiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(url)}`;
-  qrCodeUrl.value = apiUrl;
+const generateQRCode = async (url) => {
+  try {
+    // 使用qrcode库生成二维码
+    const dataURL = await QRCode.toDataURL(url, {
+      width: 300,
+      margin: 2,
+      color: {
+        dark: props.darkMode ? "#ffffff" : "#000000",
+        light: props.darkMode ? "#000000" : "#ffffff",
+      },
+    });
+    qrCodeUrl.value = dataURL;
+  } catch (error) {
+    console.error("生成二维码失败:", error);
+  }
 };
 
 // 下载二维码
@@ -639,7 +638,7 @@ const downloadQRCode = () => {
   // 创建一个链接元素
   const a = document.createElement("a");
   a.href = qrCodeUrl.value;
-  a.download = `qrcode-${Date.now()}.png`;
+  a.download = `cloudpaste-file-qrcode-${Date.now()}.png`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -669,8 +668,8 @@ const copyPermanentLink = async (file) => {
         const isAdminUser = props.userType === "admin";
         console.log(`当前用户类型: ${props.userType}, 是否管理员: ${isAdminUser}`);
 
-        // 调用相应的API
-        const response = isAdminUser ? await api.file.getFile(file.id) : await api.file.getUserFile(file.id);
+        // 调用统一的API（自动根据认证信息处理）
+        const response = await api.file.getFile(file.id);
 
         if (response.success && response.data) {
           fileWithUrls = response.data;

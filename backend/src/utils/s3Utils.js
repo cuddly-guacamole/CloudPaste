@@ -7,7 +7,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ConfiguredRetryStrategy } from "@smithy/util-retry";
 import { decryptValue } from "./crypto.js";
 import { S3ProviderTypes } from "../constants/index.js";
-import { getMimeTypeGroup, MIME_GROUPS, getMimeTypeFromFilename, getFileExtension, shouldUseTextPlainForPreview, getContentTypeAndDisposition } from "./fileUtils.js";
+import { getEffectiveMimeType, getContentTypeAndDisposition } from "./fileUtils.js";
 
 /**
  * 创建S3客户端
@@ -69,6 +69,16 @@ export async function createS3Client(config, encryptionSecret) {
       clientConfig.responseChecksumValidation = "WHEN_REQUIRED";
       break;
 
+    case S3ProviderTypes.ALIYUN_OSS:
+      // 阿里云OSS配置
+      clientConfig.signatureVersion = "v4";
+      clientConfig.requestTimeout = 30000;
+      maxRetries = 3;
+      // 禁用校验和功能以保持兼容性
+      clientConfig.requestChecksumCalculation = "WHEN_REQUIRED";
+      clientConfig.responseChecksumValidation = "WHEN_REQUIRED";
+      break;
+
     case S3ProviderTypes.OTHER:
       clientConfig.signatureVersion = "v4";
       // 禁用可能不兼容的校验和功能
@@ -82,9 +92,9 @@ export async function createS3Client(config, encryptionSecret) {
 
   // 日志记录所选服务商和配置
   console.log(
-      `正在创建S3客户端 (${config.provider_type}), endpoint: ${config.endpoint_url}, region: ${config.region || "auto"}, pathStyle: ${
-          config.path_style ? "是" : "否"
-      }, maxRetries: ${maxRetries}, checksumMode: ${clientConfig.requestChecksumCalculation || "默认"}`
+    `正在创建S3客户端 (${config.provider_type}), endpoint: ${config.endpoint_url}, region: ${config.region || "auto"}, pathStyle: ${
+      config.path_style ? "是" : "否"
+    }, maxRetries: ${maxRetries}, checksumMode: ${clientConfig.requestChecksumCalculation || "默认"}`
   );
 
   // 返回创建的S3客户端
@@ -164,6 +174,10 @@ export async function generatePresignedPutUrl(s3Config, storagePath, mimetype, e
         // 例如Content-SHA1处理，但一般在前端上传时添加
         break;
 
+      case S3ProviderTypes.ALIYUN_OSS:
+        // 阿里云OSS特殊处理 - 预签名上传URL通常不需要特殊处理
+        break;
+
       case S3ProviderTypes.OTHER:
         break;
     }
@@ -200,28 +214,6 @@ function generateCustomHostDirectUrl(s3Config, storagePath) {
 }
 
 /**
- * 替换URL中的主机名
- * @param {string} originalUrl - 原始URL
- * @param {string} customHost - 自定义主机
- * @returns {string} 替换主机后的URL
- */
-function replaceHostInUrl(originalUrl, customHost) {
-  try {
-    const url = new URL(originalUrl);
-    const customUrl = new URL(customHost);
-    url.hostname = customUrl.hostname;
-    url.protocol = customUrl.protocol;
-    if (customUrl.port) {
-      url.port = customUrl.port;
-    }
-    return url.toString();
-  } catch (error) {
-    console.error("替换URL主机失败:", error);
-    return originalUrl;
-  }
-}
-
-/**
  * 生成原始S3预签名URL（内部函数）
  * @param {Object} s3Config - S3配置
  * @param {string} storagePath - S3存储路径
@@ -243,8 +235,9 @@ async function generateOriginalPresignedUrl(s3Config, storagePath, encryptionSec
     const fileName = normalizedPath.split("/").pop();
 
     // 统一从文件名推断MIME类型，不依赖传入的mimetype参数
-    const effectiveMimetype = getMimeTypeFromFilename(fileName);
-    console.log(`S3文件下载：从文件名[${fileName}]推断MIME类型: ${effectiveMimetype}`);
+    const effectiveMimetype = getEffectiveMimeType(null, fileName);
+    const urlType = forceDownload ? "下载" : "预览";
+    console.log(`S3${urlType}URL：文件[${fileName}], MIME[${effectiveMimetype}]`);
 
     // 创建GetObjectCommand
     const commandParams = {
@@ -253,20 +246,25 @@ async function generateOriginalPresignedUrl(s3Config, storagePath, encryptionSec
     };
 
     // 使用统一的函数获取内容类型和处置方式
-    const { contentType, contentDisposition } = getContentTypeAndDisposition({
-      filename: fileName,
-      mimetype: effectiveMimetype,
-      forceDownload: forceDownload,
-    });
+    const { contentType, contentDisposition } = getContentTypeAndDisposition(fileName, effectiveMimetype, { forceDownload: forceDownload });
 
-    // 设置S3预签名URL的内容类型和处置方式
-    commandParams.ResponseContentType = contentType;
-    commandParams.ResponseContentDisposition = contentDisposition;
-
-    // 针对特定服务商添加额外参数
+    // 针对特定服务商设置响应头参数
     switch (s3Config.provider_type) {
+      case S3ProviderTypes.ALIYUN_OSS:
+        // 阿里云OSS不支持response-content-type参数，只设置content-disposition
+        // 参考：https://help.aliyun.com/zh/oss/support/0017-00000902
+        commandParams.ResponseContentDisposition = contentDisposition;
+        console.log(`阿里云OSS预签名URL：跳过ResponseContentType设置，仅设置ContentDisposition`);
+        break;
       case S3ProviderTypes.B2:
-        // B2可能需要特殊响应头
+        // B2支持标准S3响应头
+        commandParams.ResponseContentType = contentType;
+        commandParams.ResponseContentDisposition = contentDisposition;
+        break;
+      default:
+        // 标准S3兼容服务设置完整响应头
+        commandParams.ResponseContentType = contentType;
+        commandParams.ResponseContentDisposition = contentDisposition;
         break;
     }
 
@@ -283,33 +281,73 @@ async function generateOriginalPresignedUrl(s3Config, storagePath, encryptionSec
 }
 
 /**
- * 生成S3文件的下载预签名URL（支持自定义域名）
+ * 生成S3文件的下载预签名URL（支持自定义域名和缓存）
  * @param {Object} s3Config - S3配置
  * @param {string} storagePath - S3存储路径
  * @param {string} encryptionSecret - 用于解密凭证的密钥
  * @param {number} expiresIn - URL过期时间（秒），如果为null则使用S3配置的默认值
  * @param {boolean} forceDownload - 是否强制下载（而非预览）
  * @param {string} mimetype - 文件的MIME类型（可选）
+ * @param {Object} cacheOptions - 缓存选项 {userType, userId, enableCache}
  * @returns {Promise<string>} 预签名URL或自定义域名URL
  */
-export async function generatePresignedUrl(s3Config, storagePath, encryptionSecret, expiresIn = null, forceDownload = false, mimetype = null) {
+export async function generatePresignedUrl(s3Config, storagePath, encryptionSecret, expiresIn = null, forceDownload = false, mimetype = null, cacheOptions = {}) {
   // 如果没有指定过期时间，使用S3配置中的默认值
   const finalExpiresIn = expiresIn || s3Config.signature_expires_in || 3600;
 
+  // 缓存功能：检查是否启用缓存且提供了必要的缓存参数
+  const { userType, userId, enableCache = true } = cacheOptions;
+
+  if (enableCache && userType && userId) {
+    // 动态导入缓存管理器，避免循环依赖
+    const { s3UrlCacheManager } = await import("../cache/S3UrlCache.js");
+
+    // 尝试从缓存获取
+    const cachedUrl = s3UrlCacheManager.get(s3Config.id, storagePath, forceDownload, userType, userId);
+    if (cachedUrl) {
+      console.log(`🎯 S3URL缓存命中: ${storagePath}`);
+      return cachedUrl;
+    }
+  }
+
+  let generatedUrl;
+
   // 如果配置了自定义域名
   if (s3Config.custom_host) {
-    if (s3Config.custom_host_signature) {
-      // 需要签名的自定义域名：生成预签名URL后替换域名
+    // 自定义域名情况下的处理
+    if (forceDownload) {
+      // 强制下载时：使用自定义域名 + response-content-disposition参数
+      // 这样既能使用CDN加速，又能确保浏览器触发下载行为
+      console.log(`自定义域名强制下载：添加response-content-disposition参数`);
+
+      // 先生成预签名URL（包含response-content-disposition参数）
       const presignedUrl = await generateOriginalPresignedUrl(s3Config, storagePath, encryptionSecret, finalExpiresIn, forceDownload, mimetype);
-      return replaceHostInUrl(presignedUrl, s3Config.custom_host);
+
+      // 然后将域名替换为自定义域名，保留查询参数
+      const presignedUrlObj = new URL(presignedUrl);
+      const customHostUrl = generateCustomHostDirectUrl(s3Config, storagePath);
+      const customHostUrlObj = new URL(customHostUrl);
+
+      // 将预签名URL的查询参数（包含response-content-disposition）添加到自定义域名URL
+      customHostUrlObj.search = presignedUrlObj.search;
+      generatedUrl = customHostUrlObj.toString();
     } else {
-      // 不需要签名的自定义域名：直接返回自定义域名直链
-      return generateCustomHostDirectUrl(s3Config, storagePath);
+      // 预览时：使用自定义域名直链
+      generatedUrl = generateCustomHostDirectUrl(s3Config, storagePath);
     }
   } else {
     // 没有自定义域名：使用原始S3预签名URL
-    return await generateOriginalPresignedUrl(s3Config, storagePath, encryptionSecret, finalExpiresIn, forceDownload, mimetype);
+    generatedUrl = await generateOriginalPresignedUrl(s3Config, storagePath, encryptionSecret, finalExpiresIn, forceDownload, mimetype);
   }
+
+  // 缓存生成的URL
+  if (enableCache && userType && userId && generatedUrl) {
+    const { s3UrlCacheManager } = await import("../cache/S3UrlCache.js");
+    s3UrlCacheManager.set(s3Config.id, storagePath, forceDownload, userType, userId, generatedUrl, s3Config);
+    console.log(`💾 S3URL已缓存: ${storagePath}`);
+  }
+
+  return generatedUrl;
 }
 
 /**
@@ -430,8 +468,16 @@ export async function getDirectoryPresignedUrls(s3Client, sourceS3Config, target
   let continuationToken = undefined;
 
   do {
-    // 列出源目录内容
-    const listResponse = await listS3Directory(s3Client, sourceS3Config.bucket_name, sourcePrefix, "/", continuationToken);
+    // 列出源目录内容（递归遍历）
+    const listParams = {
+      Bucket: sourceS3Config.bucket_name,
+      Prefix: sourcePrefix,
+      MaxKeys: 1000,
+      ContinuationToken: continuationToken,
+    };
+
+    const command = new ListObjectsV2Command(listParams);
+    const listResponse = await s3Client.send(command);
 
     // 检查是否有内容
     if (listResponse.Contents && listResponse.Contents.length > 0) {
@@ -442,6 +488,7 @@ export async function getDirectoryPresignedUrls(s3Client, sourceS3Config, target
         // 跳过目录标记（与前缀完全匹配的对象）
         if (sourceKey === sourcePrefix) {
           continue;
+          99;
         }
 
         // 计算相对路径和目标路径
@@ -467,8 +514,8 @@ export async function getDirectoryPresignedUrls(s3Client, sourceS3Config, target
         const fileName = pathParts.pop();
 
         // 统一从文件名推断MIME类型，不依赖源文件的MIME类型
-        const { getMimeTypeFromFilename } = await import("../utils/fileUtils.js");
-        contentType = getMimeTypeFromFilename(fileName);
+        const { getEffectiveMimeType } = await import("../utils/fileUtils.js");
+        contentType = getEffectiveMimeType(null, fileName);
         console.log(`目录复制：从文件名[${fileName}]推断MIME类型: ${contentType}`);
 
         // 生成上传预签名URL

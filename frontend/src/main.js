@@ -3,12 +3,19 @@ import { createPinia } from "pinia";
 import "./style.css";
 import App from "./App.vue";
 import api, { getEnvironmentInfo } from "./api";
-import i18n from "./i18n"; // 导入i18n配置
-import router from "./router"; // 导入路由配置
+import i18n from "./i18n";
+import router from "./router";
+import MasonryWall from "@yeger/vue-masonry-wall";
+
+// 导入vue3-context-menu
+import "@imengyu/vue3-context-menu/lib/vue3-context-menu.css";
+import ContextMenu from "@imengyu/vue3-context-menu";
+
+// 导入自定义指令
+import { contextMenuDirective } from "./components/common/contextMenu.js";
 
 // 导入PWA相关模块
 import { pwaManager, pwaUtils } from "./pwa/pwaManager.js";
-import { offlineEnhancers } from "./pwa/offlineEnhancer.js";
 
 // 创建应用实例
 const app = createApp(App);
@@ -32,9 +39,6 @@ app.config.errorHandler = (err, instance, info) => {
         url: window.location.href,
         time: new Date().toISOString(),
       });
-
-      // 如果有专门的错误上报API，可以在这里调用
-      // api.reportError({ error: err.message, path: window.location.pathname });
     } catch (e) {
       // 避免上报过程中出错
       console.error("错误上报失败:", e);
@@ -77,8 +81,18 @@ app.use(i18n);
 // 挂载路由 - 在i18n之后挂载
 app.use(router);
 
-// 导入并初始化认证Store
+// 挂载MasonryWall组件 - 全局注册瀑布流组件
+app.use(MasonryWall);
+
+// 挂载vue3-context-menu - 全局注册上下文菜单组件
+app.use(ContextMenu);
+
+// 注册自定义指令
+app.directive("context-menu", contextMenuDirective);
+
+// 导入并初始化认证Store和站点配置Store
 import { useAuthStore } from "./stores/authStore.js";
+import { useSiteConfigStore } from "./stores/siteConfigStore.js";
 
 // 导入路由工具函数
 import { routerUtils } from "./router";
@@ -98,22 +112,14 @@ if (import.meta.env.DEV) {
   console.log("环境信息:", getEnvironmentInfo());
 }
 
-// 初始化PWA功能
-console.log("[PWA] 初始化PWA管理器");
-// 确保pwaManager被引用以触发初始化
+// 初始化完整的PWA功能
 if (pwaManager) {
   console.log("[PWA] PWA管理器已初始化");
-}
-
-// 初始化离线增强功能
-console.log("[PWA] 初始化离线增强功能");
-// 确保离线增强器被激活
-if (offlineEnhancers) {
-  console.log("[PWA] 离线增强器已激活:", {
-    api: !!offlineEnhancers.api,
-    markdown: !!offlineEnhancers.markdown,
-    fileExplorer: !!offlineEnhancers.fileExplorer,
-    settings: !!offlineEnhancers.settings,
+  console.log("[PWA] 支持功能:", {
+    安装: pwaUtils.isInstallable(),
+    离线存储: !!pwaUtils.storage,
+    版本: pwaUtils.getVersion(),
+    网络状态: pwaUtils.isOnline() ? "在线" : "离线",
   });
 }
 
@@ -126,13 +132,15 @@ if (savedLang && i18n.global.locale.value !== savedLang) {
 // 挂载应用
 app.mount("#app");
 
-// 初始化认证Store（在应用挂载后）
+// 初始化认证Store和站点配置Store（在应用挂载后）
 const authStore = useAuthStore();
-authStore
-  .initialize()
+const siteConfigStore = useSiteConfigStore();
+
+// 并行初始化两个Store
+Promise.all([authStore.initialize(), siteConfigStore.initialize()])
   .then(() => {
-    console.log("认证Store初始化完成");
+    console.log("认证Store和站点配置Store初始化完成");
   })
   .catch((error) => {
-    console.error("认证Store初始化失败:", error);
+    console.error("Store初始化失败:", error);
   });
